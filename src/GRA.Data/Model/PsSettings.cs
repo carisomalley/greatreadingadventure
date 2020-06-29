@@ -12,7 +12,6 @@ namespace GRA.Data.Model
         public string ContactEmail { get; set; }
 
         public int? SelectionsPerBranch { get; set; }
-
         public DateTime? RegistrationOpen { get; set; }
         public DateTime? RegistrationClosed { get; set; }
         public DateTime? SchedulingPreview { get; set; }

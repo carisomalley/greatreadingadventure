@@ -1,9 +1,6 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Text.RegularExpressions;
-using System.Threading.Tasks;
+﻿using DocumentFormat.OpenXml;
+using DocumentFormat.OpenXml.Packaging;
+using DocumentFormat.OpenXml.Spreadsheet;
 using GRA.Controllers.ViewModel.MissionControl.PerformerManagement;
 using GRA.Controllers.ViewModel.Shared;
 using GRA.Domain.Model;
@@ -14,6 +11,13 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Rendering;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 
 namespace GRA.Controllers.MissionControl
 {
@@ -26,6 +30,21 @@ namespace GRA.Controllers.MissionControl
 
         private const int KitsPerPage = 15;
         private const int PerformersPerPage = 15;
+
+        private const string ExcelMimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+        private const string ExcelFileExtension = "xlsx";
+        private const int ExcelStyleIndexBold = 1;
+
+        private readonly IEnumerable<object> headerRow = new object[]
+        {
+            "Todays Date",
+            "Performer Namer",
+            "Billing Month",
+            "Vendor Id",
+            "Performer Description",
+            "Total Cost",
+            "Performer Billing"
+        };
 
         private static readonly DateTime DefaultPerformerScheduleStartTime = DateTime.Parse("8:00 AM");
         private static readonly DateTime DefaultPerformerScheduleEndTime = DateTime.Parse("8:00 PM");
@@ -204,8 +223,13 @@ namespace GRA.Controllers.MissionControl
                 PerformerSchedulingEnabled = true,
                 RegistrationClosed = schedulingStage >= PsSchedulingStage.RegistrationClosed,
                 SchedulingStage = schedulingStage,
+                CanDownloadCoversheet = true,
                 VendorIdPrompt = settings.VendorIdPrompt ?? "Vendor ID"
             };
+            if (schedulingStage == PsSchedulingStage.SchedulingClosed)
+            {
+                viewModel.CanDownloadCoversheet = false;
+            }
             return View(viewModel);
         }
 
@@ -264,7 +288,6 @@ namespace GRA.Controllers.MissionControl
                 ShowAlertDanger("Unable to view performer: ", gex);
                 return RedirectToAction(nameof(Performers));
             }
-
             if(string.IsNullOrEmpty(settings.VendorIdPrompt))
             {
                 settings.VendorIdPrompt = "Vendor ID";
@@ -282,7 +305,6 @@ namespace GRA.Controllers.MissionControl
                 Systems = await _performerSchedulingService
                     .GetSystemListWithoutExcludedBranchesAsync()
             };
-
             if (performer.Images.Count > 0)
             {
                 viewModel.ImagePath = _pathResolver.ResolveContentPath(
@@ -470,6 +492,192 @@ namespace GRA.Controllers.MissionControl
             model.Systems = systems;
 
             return View(model);
+        }
+
+        [HttpGet]
+        public async Task<IActionResult> GetAllPerformerCoverSheetsAsync()
+        {
+            var todaysDate = DateTime.Now.ToString("dddd, MMMM dd, yyyy");
+            var ms = new System.IO.MemoryStream();
+
+            using (var workbook = SpreadsheetDocument.Create(ms, SpreadsheetDocumentType.Workbook))
+            {
+                workbook.AddWorkbookPart();
+                workbook.WorkbookPart.Workbook = new Workbook
+                {
+                    Sheets = new Sheets()
+                };
+
+                var stylesPart = workbook.WorkbookPart.AddNewPart<WorkbookStylesPart>();
+                stylesPart.Stylesheet = GetStylesheet();
+                stylesPart.Stylesheet.Save();
+
+                var sheetPart = workbook.WorkbookPart.AddNewPart<WorksheetPart>();
+                var sheetData = new SheetData();
+                sheetPart.Worksheet = new Worksheet(sheetData);
+
+                var sheets = workbook.WorkbookPart.Workbook.GetFirstChild<Sheets>();
+                var relationshipId = workbook.WorkbookPart.GetIdOfPart(sheetPart);
+
+                uint sheetId = 1;
+                if (sheets.Elements<Sheet>().Any())
+                {
+                    sheetId = sheets.Elements<Sheet>()
+                        .Max(_ => _.SheetId.Value) + 1;
+                }
+
+                string sheetName = "Performer-data";
+
+                var sheet = new Sheet
+                {
+                    Id = relationshipId,
+                    SheetId = sheetId,
+                    Name = sheetName
+                };
+                sheets.Append(sheet);
+
+                var headRow = new Row();
+                foreach (var dataItem in headerRow)
+                {
+                    var cell = CreateCell(dataItem);
+                    cell.StyleIndex = ExcelStyleIndexBold;
+                    headRow.AppendChild(cell);
+                }
+
+                sheetData.Append(headRow);
+
+                var branches = await _siteService.GetAllBranches();
+
+                foreach (var performer in await _performerSchedulingService.GetAllPerformersListAsync())
+                {
+                    performer.SelectionsCount = await _performerSchedulingService
+                        .GetPerformerSelectionCountAsync(performer.Id);
+                    if (performer.SelectionsCount > 0)
+                    {
+                        var perfPrograms = await _performerSchedulingService.GetPerformerProgramsAsync(performer.Id);
+                        var perfSchedules = await _performerSchedulingService.GetPerformerBranchSelectionsAsync(performer.Id);
+                        var monthsched = perfSchedules.Select(_ => _.ScheduleStartTime.Month).Distinct();
+
+                        foreach (var monthNum in monthsched)
+                        {
+                            var descr = new StringBuilder();
+                            decimal totalCost = 0;
+                            var row = new Row();
+                            foreach (var schedule in perfSchedules.Where(_ => _.ScheduleStartTime.Month == monthNum))
+                            {
+                                var branch = branches.FirstOrDefault(_ => _.Id == schedule.BranchId);
+                                descr.Append("(");
+                                descr.Append(branch.Name);
+                                descr.Append(")");
+                                descr.Append(Environment.NewLine);
+                                foreach (var program in perfPrograms.Where(_ => _.Id == schedule.ProgramId))
+                                {
+                                    descr.Append(program.Title);
+                                    descr.Append(" - ");
+                                    descr.Append(schedule.ScheduleStartTime.ToString("dddd, MMMM dd, yyyy"));
+                                    descr.Append(" - $");
+                                    descr.Append(Math.Round(program.Cost, 2).ToString());
+                                    totalCost += program.Cost;
+                                }
+                                descr.Append(Environment.NewLine);
+                            }
+                            var dateCell = CreateCell(todaysDate);
+                            row.AppendChild(dateCell);
+                            var perfNameCell = CreateCell(performer.Name);
+                            row.AppendChild(perfNameCell);
+                            var billingMonthCell = CreateCell(new DateTime(2010, monthNum, 1).ToString("MMMM"));
+                            row.AppendChild(billingMonthCell);
+                            var vendorIdCell = CreateCell(performer.VendorId);
+                            row.AppendChild(vendorIdCell);
+                            var descrCell = CreateCell(descr);
+                            row.AppendChild(descrCell);
+                            var costCell = CreateCell(Math.Round(totalCost, 2));
+                            row.AppendChild(costCell);
+                            var billingCell = CreateCell(performer.BillingAddress);
+                            row.AppendChild(billingCell);
+                            sheetData.Append(row);
+                        }
+                    }
+                }
+                workbook.Save();
+                workbook.Close();
+                ms.Seek(0, System.IO.SeekOrigin.Begin);
+                var fileOutput = new FileStreamResult(ms, ExcelMimeType)
+                {
+                    FileDownloadName = $"Performer-Coversheet-Data_{DateTime.Now.ToString()}.{ExcelFileExtension}"
+                };
+                return fileOutput;
+            }
+        }
+
+        private Cell CreateCell(object dataItem)
+        {
+            var addCell = new Cell
+            {
+                CellValue = new CellValue(dataItem.ToString())
+            };
+
+            switch (dataItem)
+            {
+                case int _:
+                case decimal _:
+                case long _:
+                    addCell.DataType = CellValues.Number;
+                    break;
+                case DateTime _:
+                    addCell.DataType = CellValues.Date;
+                    break;
+                default:
+                    addCell.DataType = CellValues.String;
+                    break;
+            }
+
+            return addCell;
+        }
+
+        private Stylesheet GetStylesheet()
+        {
+            var stylesheet = new Stylesheet();
+
+            var font = new Font();
+            var boldFont = new Font();
+            boldFont.Append(new Bold());
+
+            var fonts = new Fonts();
+            fonts.Append(font);
+            fonts.Append(boldFont);
+
+            var fill = new Fill();
+            var fills = new Fills();
+            fills.Append(fill);
+
+            var border = new Border();
+            var borders = new Borders();
+            borders.Append(border);
+
+            var regularFormat = new CellFormat
+            {
+                FontId = 0
+            };
+            var boldFormat = new CellFormat
+            {
+                FontId = 1
+            };
+            var alignment = new Alignment()
+            {
+                WrapText = true
+            };
+            var cellFormats = new CellFormats();
+            cellFormats.Append(regularFormat);
+            cellFormats.Append(boldFormat);
+            cellFormats.Append(alignment);
+
+            stylesheet.Append(fonts);
+            stylesheet.Append(fills);
+            stylesheet.Append(borders);
+            stylesheet.Append(cellFormats);
+
+            return stylesheet;
         }
 
         public async Task<IActionResult> PerformerImages(int id)

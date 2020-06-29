@@ -109,10 +109,19 @@
                     }
                 </tbody>
             </table>
-            @if (Model.PaginateModel.MaxPage > 1)
-            {
-                <paginate paginateModel="@Model.PaginateModel"></paginate>
-            }
+            <div class="row" style="vertical-align: middle;">
+                @if (Model.PaginateModel.MaxPage > 1)
+                {
+                    <paginate paginateModel="@Model.PaginateModel" style="display:inline-block;"></paginate>
+                }
+                @if (Model.CanDownloadCoversheet)
+                {
+                        <a asp-action="GetAllPerformerCoverSheetsAsync"
+                           class="btn btn-lg btn-default pull-right"
+                           id="getCoverSheet">Generate Coversheet</a>
+                    
+                }
+            </div>
         }
     </div>
 </div>
@@ -129,7 +138,7 @@
                 $(this).children("a.rowlink").height($(this).height() + 11);
             });
         });
-        @if (Model.SchedulingStage < GRA.Domain.Model.PsSchedulingStage.SchedulingOpen)
+        @if (Model.SchedulingStage < GRA.Domain.Model.PsSchedulingStage.SchedulingOpen && Model.Performers.Count() > 0)
         {
             <text>
             $("#deleteModal").on("show.bs.modal", function(event) {
